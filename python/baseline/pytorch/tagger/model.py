@@ -12,6 +12,9 @@ logger = logging.getLogger('baseline')
 class TaggerModelBase(nn.Module, TaggerModel):
 
     def save(self, outname):
+        m = torch.jit.script(self)
+        m.save("m.pt")
+
         torch.save(self, outname)
         basename, _ = os.path.splitext(outname)
         write_json(self.labels, basename + ".labels")

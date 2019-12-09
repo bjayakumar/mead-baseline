@@ -14,7 +14,7 @@ loader:
 unif: 0.25
 
 model: 
-  model_type: lstm 
+  model_type: lstm
   rnnsz: 100
   dropout: 0.5
   finetune: true

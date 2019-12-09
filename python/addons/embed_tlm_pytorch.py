@@ -128,7 +128,7 @@ class TransformerLMEmbeddings(PyTorchEmbeddings):
     def forward(self, x):
         input_mask = torch.zeros(x.shape, device=x.device, dtype=torch.long).masked_fill(x != 0, 1).unsqueeze(1).unsqueeze(1)
         embedding = self.embed(x)
-        z = self.get_output(x, self.transformer(embedding, mask=input_mask))
+        z = self.get_output(x, self.transformer((embedding, input_mask)))
         return z
 
     def get_output(self, inputs, z):

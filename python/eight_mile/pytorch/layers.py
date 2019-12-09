@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
+import torch.jit as jit
 import torch.nn.functional as F
 import copy
 import math
 import numpy as np
 from eight_mile.utils import listify, Offsets
 from eight_mile.utils import transition_mask as transition_mask_np
+from typing import Dict, Tuple, List
 import torch.autograd
 
 
@@ -71,13 +73,13 @@ def unsort_batch(batch, perm_idx):
 
 # Mapped
 def tensor_and_lengths(inputs):
-    if isinstance(inputs, (list, tuple)):
+    #if isinstance(inputs, (list, tuple)):
         in_tensor, lengths = inputs
-    else:
-        in_tensor = inputs
-        lengths = None  ##tf.reduce_sum(tf.cast(tf.not_equal(inputs, 0), tf.int32), axis=1)
+    #else:
+    #    in_tensor = inputs
+    #    lengths = None  ##tf.reduce_sum(tf.cast(tf.not_equal(inputs, 0), tf.int32), axis=1)
 
-    return in_tensor, lengths
+        return in_tensor, lengths
 
 
 class VariationalDropout(nn.Module):
@@ -148,6 +150,7 @@ class Identity(nn.Module):
 class MeanPool1D(nn.Module):
     def __init__(self, outsz, batch_first=True):
         super().__init__()
+        self.requires_length = True
         self.batch_first = batch_first
         self.reduction_dim = 1 if self.batch_first else 0
         self.output_dim = outsz
@@ -158,10 +161,6 @@ class MeanPool1D(nn.Module):
         # the sum is `[B, H]` so the lengths (of shape `[B]`) should be unsqueezed to
         # `[B, 1]` in order to broadcast
         return torch.sum(tensor, self.reduction_dim, keepdim=False) / torch.unsqueeze(lengths, -1).to(tensor.dtype).to(tensor.device)
-
-    @property
-    def requires_length(self):
-        return True
 
     def extra_repr(self):
         return f"batch_first={self.batch_first}"
@@ -196,7 +195,7 @@ class MaxPool1D(nn.Module):
 # Mapped
 def get_activation(name="relu"):
     if name is None or name == "ident":
-        return ident
+        return nn.Identity()
     if name == "tanh":
         return nn.Tanh()
     if name == "hardtanh":
@@ -296,13 +295,7 @@ class ParallelConv(nn.Module):
         super().__init__()
         convs = []
         outsz_filts = outsz
-        input_fmt = input_fmt.lower()
-        if input_fmt == 'bth' or input_fmt == 'btc':
-            self.transform_input = bth2bht
-        elif input_fmt == 'tbh' or input_fmt == 'tbc':
-            self.transform_input = tbh2bht
-        else:
-            self.transform_input = ident
+        self.input_fmt = input_fmt.lower()
 
         if type(outsz) == int:
             outsz_filts = len(filtsz) * [outsz]
@@ -317,6 +310,17 @@ class ParallelConv(nn.Module):
             convs.append(conv)
             # Add the module so its managed correctly
         self.convs = nn.ModuleList(convs)
+        self.requires_length = False
+
+    def transform_input(self, t: torch.Tensor) -> torch.Tensor:
+
+        if self.input_fmt == 'bth' or self.input_fmt == 'btc':
+            return bth2bht(t)
+        elif self.input_fmt == 'tbh' or self.input_fmt == 'tbc':
+            return tbh2bht(t)
+        else:
+            return t
+
 
     def forward(self, inputs):
         # TODO: change the input to btc?
@@ -331,9 +335,6 @@ class ParallelConv(nn.Module):
         mots = torch.cat(mots, 1)
         return mots # self.conv_drop(mots)
 
-    @property
-    def requires_length(self):
-        return False
 
 # Mapped
 class Highway(nn.Module):
@@ -426,7 +427,7 @@ class Dense(nn.Module):
     def __init__(self, insz, outsz, activation=None, unif=0, initializer=None):
         super().__init__()
         self.layer = pytorch_linear(insz, outsz, unif, initializer)
-        self.activation = get_activation(activation)
+        self.activation: nn.Module = get_activation(activation)
         self.output_dim = outsz
 
     def forward(self, input):
@@ -526,7 +527,7 @@ class LSTMEncoder(nn.Module):
         :return: a stacked cell
         """
         super().__init__()
-        self._requires_length = requires_length
+        self.requires_length = requires_length
         self.batch_first = batch_first
         self.nlayers = nlayers
         if nlayers == 1:
@@ -546,16 +547,12 @@ class LSTMEncoder(nn.Module):
             nn.init.xavier_uniform_(self.rnn.weight_ih_l0)
         self.output_dim = hsz
 
-    def forward(self, inputs):
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]):
         tbc, lengths = tensor_and_lengths(inputs)
         packed = torch.nn.utils.rnn.pack_padded_sequence(tbc, lengths.tolist(), batch_first=self.batch_first)
         output, hidden = self.rnn(packed)
         output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=self.batch_first)
         return self.output_fn(output, hidden)
-
-    @property
-    def requires_length(self):
-        return self._requires_length
 
     def output_fn(self, output, state):
         return output, self.extract_top_state(state)
@@ -587,7 +584,7 @@ class LSTMEncoderWithState(nn.Module):
         :return: a stacked cell
         """
         super().__init__()
-        self._requires_length = False
+        self.requires_length = False
         self.batch_first = batch_first
         self.nlayers = nlayers
         if nlayers == 1:
@@ -615,10 +612,6 @@ class LSTMEncoderWithState(nn.Module):
         inputs, hidden = inputs
         output, hidden = self.rnn(inputs, hidden)
         return output, hidden  ##concat_state_dirs(hidden)
-
-    @property
-    def requires_length(self):
-        return self._requires_length
 
 
 class LSTMEncoderAll(LSTMEncoder):
@@ -652,7 +645,7 @@ class BiLSTMEncoder(nn.Module):
         :return: a stacked cell
         """
         super().__init__()
-        self._requires_length = requires_length
+        self.requires_length = requires_length
         self.batch_first = batch_first
         self.nlayers = nlayers
         if nlayers == 1:
@@ -672,7 +665,7 @@ class BiLSTMEncoder(nn.Module):
             nn.init.xavier_uniform_(self.rnn.weight_ih_l0)
         self.output_dim = hsz
 
-    def forward(self, inputs):
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]):
         tbc, lengths = tensor_and_lengths(inputs)
         packed = torch.nn.utils.rnn.pack_padded_sequence(tbc, lengths.tolist(), batch_first=self.batch_first)
         output, hidden = self.rnn(packed)
@@ -685,10 +678,6 @@ class BiLSTMEncoder(nn.Module):
 
     def output_fn(self, output, state):
         return output, self.extract_top_state(concat_state_dirs(state))
-
-    @property
-    def requires_length(self):
-        return self._requires_length
 
 
 class BiLSTMEncoderAll(BiLSTMEncoder):
@@ -714,49 +703,6 @@ class BiLSTMEncoderHiddenContext(BiLSTMEncoder):
         return self.extract_top_state(concat_state_dirs(state))
 
 
-class EmbeddingsContainer(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def __getitem__(self, key):
-        return self._modules[key]
-
-    def __setitem__(self, key, module):
-        self.add_module(key, module)
-
-    def __delitem__(self, key):
-        del self._modules[key]
-
-    def __len__(self):
-        return len(self._modules)
-
-    def __iter__(self):
-        return iter(self._modules)
-
-    def __contains__(self, key):
-        return key in self._modules
-
-    def clear(self):
-        self._modules.clear()
-
-    def pop(self, key):
-        v = self[key]
-        del self[key]
-        return v
-
-    def keys(self):
-        return self._modules.keys()
-
-    def items(self):
-        return self._modules.items()
-
-    def values(self):
-        return self._modules.values()
-
-    def update(self, modules):
-        raise Exception('Not implemented')
-
-
 class EmbeddingsStack(nn.Module):
 
     def __init__(self, embeddings_dict, dropout_rate=0.0, requires_length=False, **kwargs):
@@ -767,48 +713,42 @@ class EmbeddingsStack(nn.Module):
 
         super().__init__()
 
-        self.embeddings = EmbeddingsContainer()
-        #input_sz = 0
+        self.keys: List[str] = []
+
+        self.output_dim = 0
+        embeddings_list = []
         for k, embedding in embeddings_dict.items():
-            self.embeddings[k] = embedding
-            #input_sz += embedding.get_dsz()
+            embeddings_list.append(embedding)
+            self.keys.append(k)
+            self.output_dim += embedding.get_dsz()
 
+        self.embeddings: nn.ModuleList = nn.ModuleList(embeddings_list)
+        self.dsz = self.output_dim
         self.dropout = nn.Dropout(dropout_rate)
-        self._requires_length = requires_length
+        self.requires_length = requires_length
 
-    def cuda(self, device=None):
-        super().cuda(device=device)
-        for emb in self.embeddings.values():
-            emb.cuda(device)
+    #def cuda(self, device=None):
+    #    super().cuda(device=device)
+    #    for emb in self.embeddings:
+    #        emb.cuda(device)
 
-    def forward(self, inputs):
+    def forward(self, inputs: Dict[str, torch.Tensor]):
         """This method performs "embedding" of the inputs.  The base method here then concatenates along depth
         dimension to form word embeddings
 
         :return: A 3-d vector where the last dimension is the concatenated dimensions of all embeddings
         """
         all_embeddings_out = []
-        for k, embedding in self.embeddings.items():
+        i = 0
+        for embedding in self.embeddings:
+        #for k, embedding in zip(self.keys, self.embeddings):
+            k = self.keys[i]
             x = inputs[k]
             embeddings_out = embedding(x)
             all_embeddings_out.append(embeddings_out)
+            i += 1
         word_embeddings = torch.cat(all_embeddings_out, -1)
         return self.dropout(word_embeddings)
-
-    @property
-    def dsz(self):
-        total_dsz = 0
-        for embeddings in self.embeddings.values():
-            total_dsz += embeddings.get_dsz()
-        return int(total_dsz)
-
-    @property
-    def output_dim(self):
-        return self.dsz
-
-    @property
-    def requires_length(self):
-        return self.requires_length
 
 
 class DenseStack(nn.Module):
@@ -832,6 +772,7 @@ class DenseStack(nn.Module):
             layer_stack.append(WithDropout(Dense(current, hsz, activation=activation), pdrop_value))
             current = hsz
         self.layer_stack = nn.Sequential(*layer_stack)
+        self.requires_length = False
 
     def forward(self, inputs):
         """Stack 1 or more hidden layers, optionally (forming an MLP)
@@ -850,10 +791,6 @@ class DenseStack(nn.Module):
         for layer in self.layer_stack:
             x = layer(x)
         return x
-
-    @property
-    def requires_length(self):
-        return False
 
 
 class VectorSequenceAttention(nn.Module):
@@ -967,7 +904,7 @@ class FineTuneModel(nn.Module):
         output_dim = self.finetuned.output_dim if stack_model is None else stack_model.output_dim
         self.output_layer = Dense(output_dim, nc, activation="log_softmax")
 
-    def forward(self, inputs):
+    def forward(self, inputs: Dict[str, torch.Tensor]):
         base_layers = self.finetuned(inputs)
         stacked = self.stack_model(base_layers) if self.stack_model is not None else base_layers
         return self.output_layer(stacked)
@@ -981,7 +918,7 @@ class CompositePooling(nn.Module):
         super().__init__()
         self.models = nn.ModuleList(models)
         self.output_dim = sum(m.output_dim for m in self.models)
-        self._requires_length = any(getattr(m, 'requires_length', False) for m in self.models)
+        self.requires_length = any(getattr(m, 'requires_length', False) for m in self.models)
 
     def forward(self, inputs):
         inputs, lengths = tensor_and_lengths(inputs)
@@ -992,10 +929,6 @@ class CompositePooling(nn.Module):
             else:
                 pooled.append(sub_model(inputs))
         return torch.cat(pooled, -1)
-
-    @property
-    def requires_length(self):
-        return self._requires_length
 
 
 class EmbedPoolStackModel(nn.Module):
@@ -1016,7 +949,7 @@ class EmbedPoolStackModel(nn.Module):
         self.output_layer = Dense(output_dim, nc, activation="log_softmax")
         self.stack_model = stack_model
 
-    def forward(self, inputs):
+    def forward(self, inputs: Dict[str, torch.Tensor]):
         lengths = inputs.get('lengths')
 
         embedded = self.embed_model(inputs)
@@ -1038,13 +971,10 @@ class WithDropout(nn.Module):
         super().__init__()
         self.layer = layer
         self.dropout = nn.Dropout(pdrop)
+        self.output_dim = self.layer.output_dim
 
     def forward(self, inputs):
         return self.dropout(self.layer(inputs))
-
-    @property
-    def output_dim(self):
-        return self.layer.output_dim
 
 
 def transition_mask(vocab, span_type, s_idx, e_idx, pad_idx=None):
@@ -1145,7 +1075,7 @@ class TaggerGreedyDecoder(nn.Module):
         tags = self.to_batch_first(tags)
         return self.loss(unaries, tags)
 
-    def forward(self, inputs):
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]):
         unaries, lengths = tensor_and_lengths(inputs)
         # If there is a constraint mask do a masked viterbi
         if self.constraint_mask is not None:
@@ -1307,7 +1237,7 @@ class CRF(nn.Module):
         alphas = vec_log_sum_exp(terminal_vars, 2)
         return alphas.view(batch_size)
 
-    def forward(self, inputs):
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]):
         unary, lengths = inputs
         if self.training:
             if self.batch_first:
@@ -1317,6 +1247,7 @@ class CRF(nn.Module):
         with torch.no_grad():
             return self.decode(unary, lengths)
 
+    @jit.export
     def decode(self, unary, lengths):
         """Do Viterbi decode on a batch.
 
@@ -1332,7 +1263,8 @@ class CRF(nn.Module):
         path, score = viterbi(unary, trans, lengths, self.start_idx, self.end_idx)
         if self.batch_first:
             path = path.transpose(0, 1)
-        return path, score
+        #return path, score
+        return path
 
 
 class SequenceModel(nn.Module):
@@ -1350,7 +1282,7 @@ class SequenceModel(nn.Module):
             self.proj_layer = Identity()
         self.decoder_model = decoder
 
-    def transduce(self, inputs):
+    def transduce(self, inputs: Dict[str, torch.Tensor]):
         lengths = inputs.get('lengths')
 
         embedded = self.embed_model(inputs)
@@ -1361,7 +1293,7 @@ class SequenceModel(nn.Module):
     def decode(self, transduced, lengths):
         return self.decoder_model((transduced, lengths))
 
-    def forward(self, inputs):
+    def forward(self, inputs: Dict[str, torch.Tensor]):
         transduced = self.transduce(inputs)
         return self.decode(transduced, inputs.get('lengths'))
 
@@ -1371,13 +1303,16 @@ class TagSequenceModel(SequenceModel):
     def __init__(self, nc, embeddings, transducer, decoder=None):
         decoder_model = CRF(nc, batch_first=False) if decoder is None else decoder
         super().__init__(nc, embeddings, transducer, decoder_model)
-        self.path_scores = None
+        #self.path_scores = None
 
     def neg_log_loss(self, unary, tags, lengths):
         return self.decoder_model.neg_log_loss(unary, tags, lengths)
 
-    def forward(self, inputs):
-        time_first, self.path_scores = super().forward(inputs)
+    def forward(self, inputs: Dict[str, torch.Tensor]):
+        #time_first, self.path_scores = \
+        #time_first = super().forward(inputs)
+        transduced = self.transduce(inputs)
+        time_first = self.decode(transduced, inputs.get('lengths'))
         return time_first.transpose(0, 1)
 
 
@@ -1518,7 +1453,6 @@ class SeqBahdanauAttention(SequenceSequenceAttention):
         # [B, H, T, T]
         scores = scores.squeeze(-1)
         return F.softmax(scores, dim=-1)
-
 
 
 class MultiHeadedAttention(nn.Module):
