@@ -301,7 +301,6 @@ class PoolingOp(nn.Module):
 
 class MaxPoolingOp(PoolingOp):
 
-
     def __init__(self, axis=-1):
         super().__init__(axis)
 
@@ -323,6 +322,7 @@ class AttentionPoolingOp(PoolingOp):
         mot, _ = attention.max(1)
         return mot
 
+
 class MeanPoolingOp(PoolingOp):
 
     def __init__(self, axis=-1):
@@ -331,36 +331,10 @@ class MeanPoolingOp(PoolingOp):
     def forward(self, bct):
         return bct.mean(self.axis)
 
-class KMaxPoolingOp(PoolingOp):
 
-    def __init__(self):
-        super().__init__()
-        self.K = 3
-
-        self.dropout = nn.Dropout((self.K-1.0)/self.K)
-
-    def forward(self, bct):
-        btc = bct.transpose(1, 2).contiguous()
-        best_scores, best_idx = btc.topk(self.K, 1)
-        # B,3,C
-        best_scores = self.dropout(best_scores)
-        return best_scores.mean(1)
-
-class NoPoolingOp(PoolingOp):
-
-
-    def __init__(self, axis=-1):
-        super().__init__(axis)
-
-    def forward(self, bct):
-        btc = bct.transpose(1, 2)
-        return btc
-
-
-# Mapped
 class ParallelConv(nn.Module):
 
-    def __init__(self, insz, outsz, filtsz, activation='relu', input_fmt="bth", Pooling=MaxPoolingOp):
+    def __init__(self, insz, outsz, filtsz, activation='relu', input_fmt="bth", num_stacking_layers=0, Pooling=MaxPoolingOp):
         super().__init__()
 
         convs = []
@@ -379,261 +353,19 @@ class ParallelConv(nn.Module):
         self.output_dim = sum(outsz_filts)
         for i, fsz in enumerate(filtsz):
             pad = fsz//2
-            conv = nn.Sequential(
-                nn.Conv1d(insz, outsz_filts[i], fsz, padding=pad),
-                get_activation(activation)
-            )
-            convs.append(conv)
+
+            stacked_conv = [nn.Conv1d(insz, outsz_filts[i], fsz, padding=pad), get_activation(activation)]
+            for j in range(num_stacking_layers):
+                stacked_conv.append(nn.MaxPool1d(fsz))
+                stacked_conv.append(nn.Conv1d(outsz_filts[i], outsz_filts[i], fsz, padding=pad))
+                stacked_conv.append(get_activation(activation))
+
+            convs.append(nn.Sequential(*stacked_conv))
             # Add the module so its managed correctly
         self.convs = nn.ModuleList(convs)
         self.pool_op = Pooling()
 
     def forward(self, inputs):
-        # TODO: change the input to btc?
-        mots = []
-        input_bct = self.transform_input(inputs)
-
-        for conv in self.convs:
-            # In Conv1d, data BxCxT, max over time
-            conv_out = conv(input_bct)
-            mot = self.pool_op(conv_out)
-            mots.append(mot)
-        mots = torch.cat(mots, -1)
-        return mots  # self.conv_drop(mots)
-
-    @property
-    def requires_length(self):
-        return False
-
-
-
-class ParallelLSTM(nn.Module):
-
-    def __init__(self, insz, outsz, filtsz, activation='relu', input_fmt="bth", Pooling=MaxPoolingOp):
-        super().__init__()
-
-        convs = []
-        outsz_filts = outsz
-        if type(outsz) == int:
-            outsz_filts = len(filtsz) * [outsz]
-
-        self.output_dim = sum(outsz_filts)
-        for i, fsz in enumerate(filtsz):
-            conv = nn.Sequential(
-                nn.LSTM(insz, outsz_filts[i], batch_first=True)
-            )
-            convs.append(conv)
-            # Add the module so its managed correctly
-        self.convs = nn.ModuleList(convs)
-        self.pool_op = Pooling()
-
-    def forward(self, inputs):
-        # TODO: change the input to btc?
-        mots = []
-
-        for conv in self.convs:
-            # In Conv1d, data BxCxT, max over time
-            conv_out = conv(inputs)[0]
-            mot = self.pool_op(conv_out)
-            mots.append(mot)
-        mots = torch.cat(mots, -1)
-        return mots  # self.conv_drop(mots)
-
-    @property
-    def requires_length(self):
-        return False
-
-class Transpose(nn.Module):
-
-    def __init__(self, d1, d2):
-        super().__init__()
-        self.d1 = d1
-        self.d2 = d2
-
-    def forward(self, tensor):
-        #print(tensor.shape)
-        return tensor.transpose(self.d1, self.d2)
-
-class ParallelLSTMConv(nn.Module):
-
-    def __init__(self, insz, outsz, filtsz, activation='relu', input_fmt="bth", Pooling=MaxPoolingOp):
-        super().__init__()
-
-        convs = []
-        outsz_filts = outsz
-        if type(outsz) == int:
-            outsz_filts = len(filtsz) * [outsz]
-
-        self.output_dim = sum(outsz_filts)
-
-        for i, fsz in enumerate(filtsz):
-
-            conv = nn.Sequential(
-                nn.LSTM(insz, outsz_filts[i], batch_first=True),
-                Transpose(1, 2),
-                nn.Conv1d(outsz_filts[i], outsz_filts[i], fsz),
-                get_activation(activation),
-            )
-            convs.append(conv)
-            # Add the module so its managed correctly
-        self.convs = nn.ModuleList(convs)
-        self.pool_op = Pooling()
-
-    def forward(self, inputs):
-        # TODO: change the input to btc?
-        mots = []
-
-        for conv in self.convs:
-            # In Conv1d, data BxCxT, max over time
-            conv_out = conv(inputs)
-            mot = self.pool_op(conv_out)
-            mots.append(mot)
-        mots = torch.cat(mots, -1)
-        return mots  # self.conv_drop(mots)
-
-    @property
-    def requires_length(self):
-        return False
-
-class ParallelConvLSTM(nn.Module):
-
-    def __init__(self, insz, outsz, filtsz, activation='relu', input_fmt="bth", Pooling=MaxPoolingOp):
-        super().__init__()
-
-        convs = []
-        outsz_filts = outsz
-        input_fmt = input_fmt.lower()
-        if input_fmt == 'bth' or input_fmt == 'btc':
-            self.transform_input = bth2bht
-        elif input_fmt == 'tbh' or input_fmt == 'tbc':
-            self.transform_input = tbh2bht
-        else:
-            self.transform_input = ident
-
-        if type(outsz) == int:
-            outsz_filts = len(filtsz) * [outsz]
-
-        self.output_dim = sum(outsz_filts)
-        for i, fsz in enumerate(filtsz):
-            pad = fsz//2
-            conv = nn.Sequential(
-                nn.Conv1d(insz, outsz_filts[i], fsz, padding=pad),
-                get_activation(activation),
-                nn.MaxPool1d(fsz),
-                Transpose(1, 2),
-                nn.LSTM(outsz_filts[i], outsz_filts[i]),
-            )
-            convs.append(conv)
-            # Add the module so its managed correctly
-        self.convs = nn.ModuleList(convs)
-        self.pool_op = Pooling(1)
-
-    def forward(self, inputs):
-        # TODO: change the input to btc?
-        mots = []
-        input_bct = self.transform_input(inputs)
-
-        for conv in self.convs:
-            # In Conv1d, data BxCxT, max over time
-            conv_out = conv(input_bct)[0]
-            mot = self.pool_op(conv_out)
-            mots.append(mot)
-        mots = torch.cat(mots, -1)
-        return mots  # self.conv_drop(mots)
-
-    @property
-    def requires_length(self):
-        return False
-
-class ParallelConv3(nn.Module):
-
-    def __init__(self, insz, outsz, filtsz, activation='relu', input_fmt="bth", Pooling=MaxPoolingOp):
-        super().__init__()
-
-        convs = []
-        outsz_filts = outsz
-        input_fmt = input_fmt.lower()
-        if input_fmt == 'bth' or input_fmt == 'btc':
-            self.transform_input = bth2bht
-        elif input_fmt == 'tbh' or input_fmt == 'tbc':
-            self.transform_input = tbh2bht
-        else:
-            self.transform_input = ident
-
-        if type(outsz) == int:
-            outsz_filts = len(filtsz) * [outsz]
-
-        self.output_dim = sum(outsz_filts)
-        for i, fsz in enumerate(filtsz):
-            pad = fsz//2
-            conv = nn.Sequential(
-                nn.Conv1d(insz, outsz_filts[i], fsz, padding=pad),
-                get_activation(activation),
-                nn.MaxPool1d(fsz),
-                nn.Conv1d(outsz_filts[i], outsz_filts[i], fsz, padding=pad),
-                get_activation(activation),
-                nn.MaxPool1d(fsz),
-                nn.Conv1d(outsz_filts[i], outsz_filts[i], fsz, padding=pad),
-                get_activation(activation),
-            )
-            convs.append(conv)
-            # Add the module so its managed correctly
-        self.convs = nn.ModuleList(convs)
-        self.pool_op = Pooling()
-
-    def forward(self, inputs):
-        # TODO: change the input to btc?
-        mots = []
-        input_bct = self.transform_input(inputs)
-
-        for conv in self.convs:
-            # In Conv1d, data BxCxT, max over time
-            conv_out = conv(input_bct)
-            mot = self.pool_op(conv_out)
-            mots.append(mot)
-        mots = torch.cat(mots, -1)
-        return mots  # self.conv_drop(mots)
-
-    @property
-    def requires_length(self):
-        return False
-
-
-class ParallelConv2(nn.Module):
-
-    def __init__(self, insz, outsz, filtsz, activation='relu', input_fmt="bth", Pooling=MaxPoolingOp):
-        super().__init__()
-
-        convs = []
-        outsz_filts = outsz
-        input_fmt = input_fmt.lower()
-        if input_fmt == 'bth' or input_fmt == 'btc':
-            self.transform_input = bth2bht
-        elif input_fmt == 'tbh' or input_fmt == 'tbc':
-            self.transform_input = tbh2bht
-        else:
-            self.transform_input = ident
-
-        if type(outsz) == int:
-            outsz_filts = len(filtsz) * [outsz]
-
-        self.output_dim = sum(outsz_filts)
-        for i, fsz in enumerate(filtsz):
-            pad = fsz//2
-            conv = nn.Sequential(
-                nn.Conv1d(insz, outsz_filts[i], fsz, padding=pad),
-                get_activation(activation),
-                nn.MaxPool1d(fsz),
-                nn.Conv1d(outsz_filts[i], outsz_filts[i], fsz, padding=pad),
-                get_activation(activation),
-            )
-            convs.append(conv)
-            # Add the module so its managed correctly
-        self.convs = nn.ModuleList(convs)
-        self.pool_op = Pooling()
-
-    def forward(self, inputs):
-        # TODO: change the input to btc?
         mots = []
         input_bct = self.transform_input(inputs)
 
@@ -665,6 +397,7 @@ class Highway(nn.Module):
         proj_gate = nn.functional.sigmoid(self.transform(input))
         gated = (proj_gate * proj_result) + ((1 - proj_gate) * input)
         return gated
+
 
 def pytorch_linear(in_sz, out_sz, unif=0, initializer=None, bias=True):
     l = nn.Linear(in_sz, out_sz, bias=bias)
