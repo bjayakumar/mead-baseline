@@ -7,7 +7,7 @@ import math
 import numpy as np
 from eight_mile.utils import listify, Offsets
 from eight_mile.utils import transition_mask as transition_mask_np
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List #, Optional
 import torch.autograd
 
 
@@ -43,7 +43,7 @@ def argmax(vec):
     return idx.data[0]
 
 
-def vec_log_sum_exp(vec, dim):
+def vec_log_sum_exp(vec, dim: int):
     """Vectorized version of log-sum-exp
 
     :param vec: Vector
@@ -71,15 +71,17 @@ def unsort_batch(batch, perm_idx):
     return batch.scatter_(0, perm_idx.expand_as(batch), batch)
 
 
-# Mapped
-def tensor_and_lengths(inputs):
-    #if isinstance(inputs, (list, tuple)):
-        in_tensor, lengths = inputs
-    #else:
-    #    in_tensor = inputs
-    #    lengths = None  ##tf.reduce_sum(tf.cast(tf.not_equal(inputs, 0), tf.int32), axis=1)
 
-        return in_tensor, lengths
+def tensor_and_lengths(inputs: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    #if True: #isinstance(inputs, (list, tuple)):
+    in_tensor: torch.Tensor = inputs[0]
+    lengths: torch.Tensor = inputs[1]
+    #else:
+    #    in_tensor: torch.Tensor = inputs[0]
+    #    lengths: torch.Tensor = in_tensor.ones(in_tensor.shape[0], in_tensor.shape[1])
+
+    return in_tensor, lengths
 
 
 class VariationalDropout(nn.Module):
@@ -548,11 +550,12 @@ class LSTMEncoder(nn.Module):
         self.output_dim = hsz
 
     def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]):
-        tbc, lengths = tensor_and_lengths(inputs)
-        packed = torch.nn.utils.rnn.pack_padded_sequence(tbc, lengths.tolist(), batch_first=self.batch_first)
-        output, hidden = self.rnn(packed)
-        output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=self.batch_first)
-        return self.output_fn(output, hidden)
+        pass
+        #tbc, lengths = tensor_and_lengths(inputs)
+        #packed = torch.nn.utils.rnn.pack_padded_sequence(tbc, lengths, batch_first=self.batch_first)
+        #output, hidden = self.rnn(packed)
+        #output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=self.batch_first)
+        #return self.output_fn(output, hidden)
 
     def output_fn(self, output, state):
         return output, self.extract_top_state(state)
@@ -562,10 +565,49 @@ class LSTMEncoder(nn.Module):
         return tuple(s.view(self.nlayers, 1, -1, self.output_dim)[-1, 0] for s in state)
 
 
-class LSTMEncoderSequence(LSTMEncoder):
+class LSTMEncoderSequence(nn.Module):
 
-    def output_fn(self, output, state):
+    def __init__(self, insz, hsz, nlayers, pdrop=0.0, requires_length=True, batch_first=False, unif=0, initializer=None, **kwargs):
+        """Produce a stack of biLSTMs with dropout performed on all but the last layer.
+
+        :param insz: (``int``) The size of the input
+        :param hsz: (``int``) The number of hidden units per LSTM
+        :param nlayers: (``int``) The number of layers of LSTMs to stack
+        :param pdrop: (``float``) The probability of dropping a unit value during dropout
+        :param output_fn: function to determine what is returned from the encoder
+        :param requires_length: (``bool``) Does this encoder require an input length in its inputs (defaults to ``True``)
+        :param batch_first: (``bool``) Should we do batch first input or time-first input?
+        :return: a stacked cell
+        """
+        super().__init__()
+        self.requires_length = requires_length
+        self.batch_first = batch_first
+        self.nlayers = nlayers
+        if nlayers == 1:
+            pdrop = 0.0
+        self.rnn = torch.nn.LSTM(insz, hsz, nlayers, dropout=pdrop, bidirectional=False, batch_first=batch_first)
+        if initializer == "ortho":
+            nn.init.orthogonal(self.rnn.weight_hh_l0)
+            nn.init.orthogonal(self.rnn.weight_ih_l0)
+        elif initializer == "he" or initializer == "kaiming":
+            nn.init.kaiming_uniform(self.rnn.weight_hh_l0)
+            nn.init.kaiming_uniform(self.rnn.weight_ih_l0)
+        elif unif > 0:
+            for weight in self.rnn.parameters():
+                weight.data.uniform_(-unif, unif)
+        else:
+            nn.init.xavier_uniform_(self.rnn.weight_hh_l0)
+            nn.init.xavier_uniform_(self.rnn.weight_ih_l0)
+        self.output_dim = hsz
+
+
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]):
+        tbc, lengths = tensor_and_lengths(inputs)
+        packed = torch.nn.utils.rnn.pack_padded_sequence(tbc, lengths, batch_first=self.batch_first)
+        output, hidden = self.rnn(packed)
+        output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=self.batch_first)
         return output
+
 
 
 class LSTMEncoderWithState(nn.Module):
@@ -667,16 +709,16 @@ class BiLSTMEncoder(nn.Module):
 
     def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]):
         tbc, lengths = tensor_and_lengths(inputs)
-        packed = torch.nn.utils.rnn.pack_padded_sequence(tbc, lengths.tolist(), batch_first=self.batch_first)
+        packed = torch.nn.utils.rnn.pack_padded_sequence(tbc, lengths, batch_first=self.batch_first)
         output, hidden = self.rnn(packed)
         output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=self.batch_first)
         return self.output_fn(output, hidden)
 
-    def extract_top_state(self, state):
+    def extract_top_state(self, state: Tuple[torch.Tensor, torch.Tensor]):
         # Select the topmost state with -1 and the only direction is forward (select with 0)
         return tuple(s.view(self.nlayers, 1, -1, self.output_dim)[-1, 0] for s in state)
 
-    def output_fn(self, output, state):
+    def output_fn(self, output: torch.Tensor, state: Tuple[torch.Tensor, torch.Tensor]):
         return output, self.extract_top_state(concat_state_dirs(state))
 
 
@@ -685,9 +727,45 @@ class BiLSTMEncoderAll(BiLSTMEncoder):
         return output, concat_state_dirs(state)
 
 
-class BiLSTMEncoderSequence(BiLSTMEncoder):
+class BiLSTMEncoderSequence(nn.Module):
 
-    def output_fn(self, output, state):
+    def __init__(self, insz, hsz, nlayers, pdrop=0.0, requires_length=True, batch_first=False, unif=0, initializer=None, **kwargs):
+        """Produce a stack of LSTMs with dropout performed on all but the last layer.
+
+        :param insz: (``int``) The size of the input
+        :param hsz: (``int``) The number of hidden units per biLSTM (`hsz//2` used for each dir)
+        :param nlayers: (``int``) The number of layers of LSTMs to stack
+        :param dropout: (``int``) The probability of dropping a unit value during dropout
+        :param requires_length: (``bool``) Does this encoder require an input length in its inputs (defaults to ``True``)
+        :param batch_first: (``bool``) Should we do batch first input or time-first input?
+        :return: a stacked cell
+        """
+        super().__init__()
+        self.requires_length = requires_length
+        self.batch_first = batch_first
+        self.nlayers = nlayers
+        if nlayers == 1:
+            pdrop = 0.0
+        self.rnn = torch.nn.LSTM(insz, hsz//2, nlayers, dropout=pdrop, bidirectional=True, batch_first=batch_first)
+        if initializer == "ortho":
+            nn.init.orthogonal(self.rnn.weight_hh_l0)
+            nn.init.orthogonal(self.rnn.weight_ih_l0)
+        elif initializer == "he" or initializer == "kaiming":
+            nn.init.kaiming_uniform(self.rnn.weight_hh_l0)
+            nn.init.kaiming_uniform(self.rnn.weight_ih_l0)
+        elif unif > 0:
+            for weight in self.rnn.parameters():
+                weight.data.uniform_(-unif, unif)
+        else:
+            nn.init.xavier_uniform_(self.rnn.weight_hh_l0)
+            nn.init.xavier_uniform_(self.rnn.weight_ih_l0)
+        self.output_dim = hsz
+
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        tbc, lengths = tensor_and_lengths(inputs)
+        packed = torch.nn.utils.rnn.pack_padded_sequence(tbc, lengths, batch_first=self.batch_first)
+        output, hidden = self.rnn(packed)
+        output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=self.batch_first)
         return output
 
 
@@ -986,7 +1064,7 @@ def transition_mask(vocab, span_type, s_idx, e_idx, pad_idx=None):
     return torch.from_numpy(np_mask) == 0
 
 
-def viterbi(unary, trans, lengths, start_idx, end_idx, norm = lambda x, y: x):
+def viterbi(unary, trans, lengths, start_idx: int, end_idx: int): #, norm = lambda x, y: x):
     """Do Viterbi decode on a batch.
 
     :param unary: torch.FloatTensor: [T, B, N]
@@ -1002,9 +1080,9 @@ def viterbi(unary, trans, lengths, start_idx, end_idx, norm = lambda x, y: x):
     backpointers = []
 
     # Alphas: [B, 1, N]
-    alphas = torch.Tensor(batch_size, 1, tag_size).fill_(-1e4).to(unary.device)
+    alphas = torch.full((batch_size, 1, tag_size), -1e4, device=unary.device)
     alphas[:, 0, start_idx] = 0
-    alphas = norm(alphas, -1) if norm else alphas
+    ##alphas = norm(alphas, -1) if norm else alphas
 
     for i, unary_t in enumerate(unary):
         next_tag_var = alphas + trans
@@ -1208,9 +1286,10 @@ class CRF(nn.Module):
         batch_size = lengths.shape[0]
         lengths.shape[0] == unary.shape[1]
 
-        alphas = torch.Tensor(batch_size, 1, self.num_tags).fill_(-1e4).to(unary.device)
+        alphas = torch.full((batch_size, 1, self.num_tags), -1e4, device=unary.device)
+        #alphas = alphas.to(unary.device)
         alphas[:, 0, self.start_idx] = 0.
-        alphas.requires_grad = True
+        #alphas.requires_grad = True
 
         trans = self.transitions  # [1, N, N]
 
@@ -1244,8 +1323,8 @@ class CRF(nn.Module):
                 unary = unary.transpose(0, 1)
             return self._forward_alg(unary, lengths)
 
-        with torch.no_grad():
-            return self.decode(unary, lengths)
+        #with torch.no_grad():
+        return self.decode(unary, lengths)
 
     @jit.export
     def decode(self, unary, lengths):
@@ -1283,19 +1362,20 @@ class SequenceModel(nn.Module):
         self.decoder_model = decoder
 
     def transduce(self, inputs: Dict[str, torch.Tensor]):
-        lengths = inputs.get('lengths')
+        lengths = inputs['lengths']
 
         embedded = self.embed_model(inputs)
         embedded = (embedded, lengths)
-        transduced = self.proj_layer(self.transducer_model(embedded))
-        return transduced
+        transduced = self.transducer_model(embedded)
+        projected = self.proj_layer(transduced)
+        return projected
 
     def decode(self, transduced, lengths):
         return self.decoder_model((transduced, lengths))
 
     def forward(self, inputs: Dict[str, torch.Tensor]):
         transduced = self.transduce(inputs)
-        return self.decode(transduced, inputs.get('lengths'))
+        return self.decode(transduced, inputs['lengths'])
 
 
 class TagSequenceModel(SequenceModel):
@@ -1312,7 +1392,7 @@ class TagSequenceModel(SequenceModel):
         #time_first, self.path_scores = \
         #time_first = super().forward(inputs)
         transduced = self.transduce(inputs)
-        time_first = self.decode(transduced, inputs.get('lengths'))
+        time_first = self.decode(transduced, inputs['lengths'])
         return time_first.transpose(0, 1)
 
 
