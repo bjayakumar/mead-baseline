@@ -11,10 +11,10 @@ from typing import Dict, Tuple, List #, Optional
 import torch.autograd
 
 
-def sequence_mask(lengths, max_len=-1):
+def sequence_mask(lengths: torch.Tensor, max_len: int = -1) -> torch.Tensor:
     lens = lengths.cpu()
     if max_len < 0:
-        max_len = torch.max(lens).item()
+        max_len: int = int(torch.max(lens).item())
     # 1 x T
     row = torch.arange(0, max_len).type_as(lens).view(1, -1)
     # B x 1
@@ -1087,7 +1087,7 @@ def viterbi(unary, trans, lengths, start_idx: int, end_idx: int): #, norm = lamb
     for i, unary_t in enumerate(unary):
         next_tag_var = alphas + trans
         viterbi, best_tag_ids = torch.max(next_tag_var, 2)
-        backpointers.append(best_tag_ids.data)
+        backpointers.append(best_tag_ids)
         new_alphas = viterbi + unary_t
         new_alphas.unsqueeze_(1)
         if i >= min_length:
@@ -1103,7 +1103,9 @@ def viterbi(unary, trans, lengths, start_idx: int, end_idx: int): #, norm = lamb
     rev_len = seq_len - lengths - 1
 
     best_path = [best_tag_id]
-    for i, backpointer_t in enumerate(reversed(backpointers)):
+    for i in range(len(backpointers)):
+        t = len(backpointers) - i - 1
+        backpointer_t = backpointers[t]
         # Get new best tag candidate
         new_best_tag_id = backpointer_t.gather(1, best_tag_id.unsqueeze(1)).squeeze(1)
         # We are going backwards now, if flipped length was passed

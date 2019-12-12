@@ -34,7 +34,7 @@ class TaggerModelBase(nn.Module, TaggerModel):
         return model
 
     def __init__(self):
-        super(TaggerModelBase, self).__init__()
+        super().__init__()
         self.gpu = False
 
     def init_embed(self, **kwargs):
@@ -121,7 +121,7 @@ class TaggerModelBase(nn.Module, TaggerModel):
             example_dict['ids'] = ids
         return example_dict
 
-    def forward(self, input):
+    def forward(self, input: Dict[str, torch.Tensor]):
         return self.layers(input)
 
     def compute_loss(self, inputs):
