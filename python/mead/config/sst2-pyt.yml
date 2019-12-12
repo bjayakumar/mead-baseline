@@ -30,4 +30,3 @@ train:
   verbose:
     console: True
     file: sst2-cm.csv 
-

@@ -318,7 +318,10 @@ class AttentionPoolingOp(PoolingOp):
 
     def forward(self, bct):
         btc = bct.transpose(1, 2).contiguous()
-        attention = self.attention((btc, btc, btc, None))
+        reduced_channels = btc.sum(-1)
+        mask = torch.zeros_like(reduced_channels, device=reduced_channels.device, dtype=torch.long).masked_fill(reduced_channels != 0, 1)
+        mask = mask.unsqueeze(2)
+        attention = self.attention((btc, btc, btc, mask))
         mot, _ = attention.max(1)
         return mot
 
