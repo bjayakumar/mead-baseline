@@ -13,8 +13,7 @@ class TaggerModelBase(nn.Module, TaggerModel):
 
     def save(self, outname):
         m = torch.jit.script(self)
-        m.save("m.pt")
-
+        m.save(f'{outname}.script')
         torch.save(self, outname)
         basename, _ = os.path.splitext(outname)
         write_json(self.labels, basename + ".labels")
@@ -29,6 +28,9 @@ class TaggerModelBase(nn.Module, TaggerModel):
         device = kwargs.get('device')
         if not os.path.exists(filename):
             filename += '.pyt'
+        #if os.path.exists('f{outname}.script'):
+        #    model = torch.jit.load(filename)
+        #else:
         model = torch.load(filename, map_location=device)
         model.gpu = False if device == 'cpu' else model.gpu
         return model
