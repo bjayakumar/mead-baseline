@@ -199,7 +199,7 @@ class SinusoidalPositionalMixin(PositionalMixin):
         pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
 
-    def positional(self, length):
+    def positional(self, length: int):
         return self.pe[:, :length]
 
 
@@ -228,7 +228,7 @@ class PositionalLookupTableEmbeddings(SinusoidalPositionalMixin, LookupTableEmbe
         :param x: The temporal signal in, to which the positional embeddings are applied
         :return: Embedded output
         """
-        x = super().forward(x) * self.scale
+        x = self.embeddings(x) * self.scale
         x = x + self.positional(x.size(1))
         return self.dropout(x)
 

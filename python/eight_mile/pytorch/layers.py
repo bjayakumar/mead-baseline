@@ -867,9 +867,9 @@ class EmbeddingsStack(nn.Module):
         :return: A 3-d vector where the last dimension is the concatenated dimensions of all embeddings
         """
         all_embeddings_out = []
-        i = 0
+        i: int = 0
         for embedding in self.embeddings:
-            k = self.keys[i]
+            k: str = self.keys[i]
             x = inputs[k]
             embeddings_out = embedding(x)
             all_embeddings_out.append(embeddings_out)
@@ -1022,10 +1022,10 @@ class FineTuneModel(nn.Module):
 
     def __init__(self, nc, embeddings, stack_model=None):
         super().__init__()
-        if isinstance(embeddings, dict):
-            self.finetuned = EmbeddingsStack(embeddings)
-        else:
-            self.finetuned = embeddings
+        #if isinstance(embeddings, dict):
+        self.finetuned = EmbeddingsStack(embeddings)
+        #else:
+        #    self.finetuned = embeddings
         self.stack_model = stack_model
         output_dim = self.finetuned.output_dim if stack_model is None else stack_model.output_dim
         self.output_layer = Dense(output_dim, nc, activation="log_softmax")
@@ -1649,8 +1649,10 @@ def subsequent_mask(size: int):
     :return: A tensor of type `uint8` that is 1s along diagonals and below, zero  o.w
     """
     attn_shape = (1, 1, size, size)
-    sub_mask = np.tril(np.ones(attn_shape)).astype('uint8')
-    return torch.from_numpy(sub_mask)
+    return torch.tril(torch.ones(attn_shape, dtype=torch.uint8))
+    #sub_mask = np.tril(np.ones(attn_shape)).astype('uint8')
+    #s2 = torch.from_numpy(sub_mask)
+    #return s2
 
 
 class SequenceSequenceAttention(nn.Module):

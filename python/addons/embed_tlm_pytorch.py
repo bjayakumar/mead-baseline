@@ -179,7 +179,7 @@ class TransformerLMEmbeddings(PyTorchEmbeddingsModel):
 
     """
     def __init__(self, name, **kwargs):
-        super(TransformerLMEmbeddings, self).__init__(name)
+        super().__init__(name)
         self.vocab = read_json(kwargs.get('vocab_file'))
         self.cls_index = self.vocab['[CLS]']
         self.vsz = len(self.vocab)
@@ -193,8 +193,9 @@ class TransformerLMEmbeddings(PyTorchEmbeddingsModel):
         self.transformer = TransformerEncoderStack(num_heads, d_model=self.d_model, pdrop=pdrop, scale=True, layers=layers, d_ff=d_ff)
         self.mlm = kwargs.get('mlm', False)
 
-    def embed(self, input):
-        embedded = self.embeddings['x'](input)
+    def embed(self, input: Dict[str, torch.Tensor]):
+        #embeddings: EmbeddingsStack = self.embeddings
+        embedded = self.embeddings(input)
         embedded_dropout = self.embed_dropout(embedded)
         if self.embeddings_proj:
             embedded_dropout = self.embeddings_proj(embedded_dropout)
@@ -217,7 +218,7 @@ class TransformerLMEmbeddings(PyTorchEmbeddingsModel):
             self.embeddings_proj = None
         return input_sz
 
-    def _model_mask(self, nctx):
+    def _model_mask(self, nctx: int) -> torch.Tensor:
         """This function creates the mask that controls which token to be attended to depending on the model. A causal
         LM should have a subsequent mask; and a masked LM should have no mask."""
         if self.mlm:
