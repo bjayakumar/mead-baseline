@@ -1,3 +1,0 @@
-[submodule "layers"]
-	path = layers
-	url = git@github.com:mead-ml/mead-layers.git
